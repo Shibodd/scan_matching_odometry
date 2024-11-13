@@ -181,7 +181,7 @@ public:
           assert(false);
       }
 
-      publish_twist(m_old_data->t, msg->header.frame_id, translation / deltaT, rotation / deltaT);
+      publish_twist(twist_timestamp, msg->header.frame_id, translation / deltaT, rotation / deltaT);
     }
 
     m_old_data.emplace(std::move(dp), t);
