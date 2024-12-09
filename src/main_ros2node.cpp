@@ -1,21 +1,18 @@
-#include <geometry_msgs/msg/detail/twist_stamped__struct.hpp>
 #include <rclcpp/rclcpp.hpp>
 
-#include <sensor_msgs/msg/laser_scan.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 
+#include <sensor_msgs/msg/laser_scan.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/twist_stamped.hpp>
 
+#include <scan_matching/matcher.hpp>
+
 #include "pm_ros.hpp"
 #include "parameters.hpp"
 
-enum class TwistTimestampMode {
-  Previous,
-  Average,
-  Current
-};
+using namespace scan_matching_odometry;
 
 static const std::map<std::string, TwistTimestampMode> twist_timestamp_mode_map {
   { "previous", TwistTimestampMode::Previous },
@@ -23,7 +20,7 @@ static const std::map<std::string, TwistTimestampMode> twist_timestamp_mode_map 
   { "current", TwistTimestampMode::Current }
 };
 
-class Matcher : public rclcpp::Node {
+class MatcherNode : public rclcpp::Node {
   std::string m_frame_id;
 
   rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr m_sub;
@@ -33,16 +30,10 @@ class Matcher : public rclcpp::Node {
   std::optional<rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr> m_twist_pub;
   TwistTimestampMode m_twist_ts_mode;
 
-  struct OldData {
-    PointMatcher<double>::DataPoints dp;
-    std::chrono::nanoseconds t;
-  };
-
-  std::optional<OldData> m_old_data;
-  Eigen::Matrix<double, 3, 3> m_pose;
+  Matcher m_matcher;
 
 public:
-  Matcher() : rclcpp::Node("scan_matching_odometry")
+  MatcherNode() : rclcpp::Node("scan_matching_odometry")
   {
     Parameters p(this);
     m_frame_id = p.get<std::string>("frame_id", "scan_matching_odom");
@@ -52,7 +43,7 @@ public:
       m_sub = this->create_subscription<sensor_msgs::msg::LaserScan>(
         scan_p.get<std::string>("topic", "/scan"),
         scan_p.parse_qos("qos"),
-        std::bind(&Matcher::on_message, this, std::placeholders::_1)
+        std::bind(&MatcherNode::on_message, this, std::placeholders::_1)
       );
     }
 
@@ -88,14 +79,12 @@ public:
         m_twist_ts_mode = ts_mode_it->second;
       }
     }
-    
-    m_pose.setIdentity();
   }
 
-  void publish_pose(std::chrono::nanoseconds t, const std::string& child_frame_id) {
-    auto position = m_pose.topRightCorner<2,1>();
+  void publish_pose(const Pose& pose, const std::string& child_frame_id) {
+    auto position = pose.transform.topRightCorner<2,1>();
 
-    Eigen::AngleAxis<double> aa(std::atan2(m_pose(1,0), m_pose(0,0)), Eigen::Vector3d(0, 0, 1));
+    Eigen::AngleAxis<double> aa(std::atan2(pose.transform(1,0), pose.transform(0,0)), Eigen::Vector3d(0, 0, 1));
     Eigen::Quaternion<double> q(aa);
     geometry_msgs::msg::Quaternion quat_msg;
     quat_msg.w = q.w();
@@ -106,7 +95,7 @@ public:
     if (m_pose_pub.has_value()) {
       geometry_msgs::msg::PoseStamped pose_msg;
       pose_msg.header.frame_id = m_frame_id;
-      pose_msg.header.stamp = rclcpp::Time(t.count());
+      pose_msg.header.stamp = rclcpp::Time(pose.t.count());
       pose_msg.pose.orientation = quat_msg;
       pose_msg.pose.position.x = position.x();
       pose_msg.pose.position.y = position.y();
@@ -117,7 +106,7 @@ public:
     if (m_tf_broadcaster.has_value()) {
       geometry_msgs::msg::TransformStamped tf_msg;
       tf_msg.header.frame_id = m_frame_id;
-      tf_msg.header.stamp = rclcpp::Time(t.count());
+      tf_msg.header.stamp = rclcpp::Time(pose.t.count());
       tf_msg.child_frame_id = child_frame_id;
       tf_msg.transform.translation.x = position.x();
       tf_msg.transform.translation.y = position.y();
@@ -127,69 +116,36 @@ public:
     }
   }
 
-  void publish_twist(std::chrono::nanoseconds t, const std::string& frame_id, const Eigen::Vector2d& linear, double angular) {
+  void publish_twist(const Twist& twist, const std::string& frame_id) {
     if (m_twist_pub.has_value()) {
       geometry_msgs::msg::TwistStamped twist_msg;
-      twist_msg.header.stamp = rclcpp::Time(t.count());
+      twist_msg.header.stamp = rclcpp::Time(twist.t.count());
       twist_msg.header.frame_id = frame_id;
-      twist_msg.twist.linear.x = linear.x();
-      twist_msg.twist.linear.y = linear.y();
+      twist_msg.twist.linear.x = twist.linear.x();
+      twist_msg.twist.linear.y = twist.linear.y();
       twist_msg.twist.linear.z = 0;
       twist_msg.twist.angular.x = 0;
       twist_msg.twist.angular.y = 0;
-      twist_msg.twist.angular.z = angular;
+      twist_msg.twist.angular.z = twist.angular;
       (*m_twist_pub)->publish(twist_msg);
     }
   }
 
   void on_message(const sensor_msgs::msg::LaserScan::ConstSharedPtr& msg) {
-    auto dp = rosMsgToPointMatcherCloud<double>(*msg);
-    std::chrono::nanoseconds t(rclcpp::Time(msg->header.stamp).nanoseconds());
+    Odometry odom = m_matcher.update(
+      std::chrono::nanoseconds(rclcpp::Time(msg->header.stamp).nanoseconds()),
+      rosMsgToPointMatcherCloud<double>(*msg)
+    );
 
-    if (m_old_data.has_value()) {
-      PointMatcher<double>::ICP icp;
-      icp.setDefault();
-      PointMatcher<double>::TransformationParameters T = icp(dp, m_old_data->dp);
-      assert(T.rows() == 3 && T.cols() == 3);
-
-      Eigen::Ref<Eigen::Matrix3d> Tf(T);
-      
-      // Assert that the result is a rigid transformation
-      assert((Tf(0,0) == Tf(1,1)) && (Tf(1,0) == -Tf(0,1)));
-      assert(std::abs(Tf.topLeftCorner<2,2>().determinant() - 1) < 1e-8);
-      assert((Tf.bottomLeftCorner<1,3>() == Eigen::Matrix<double, 1, 3>(0, 0, 1)));
-      
-      m_pose = m_pose * Tf;
-      publish_pose(t, msg->header.frame_id);
-
-      Eigen::Vector2d translation = Tf.topRightCorner<2,1>();
-      double rotation = std::atan2(Tf(1,0), Tf(0,0));
-      double deltaT = std::chrono::duration<double>(t - m_old_data->t).count();
-      std::chrono::nanoseconds twist_timestamp;
-
-      switch (m_twist_ts_mode) {
-        case TwistTimestampMode::Previous:
-          twist_timestamp = m_old_data->t;
-          break;
-        case TwistTimestampMode::Average:
-          twist_timestamp = m_old_data->t + (t - m_old_data->t) / 2;
-          break;
-        case TwistTimestampMode::Current:
-          twist_timestamp = t;
-          break;
-        default:
-          assert(false);
-      }
-
-      publish_twist(twist_timestamp, msg->header.frame_id, translation / deltaT, rotation / deltaT);
+    publish_pose(odom.pose, msg->header.frame_id);
+    if (odom.twist.has_value()) {
+      publish_twist(*odom.twist, msg->header.frame_id);
     }
-
-    m_old_data.emplace(std::move(dp), t);
   }
 };
 
 int main(int argc, char* argv[]) {
   rclcpp::init(argc, argv);
-  rclcpp::spin(std::make_shared<Matcher>());
+  rclcpp::spin(std::make_shared<MatcherNode>());
   rclcpp::shutdown();
 }
