@@ -9,9 +9,9 @@
 
 namespace scan_matching_odometry {
   enum class TwistTimestampMode {
-    Previous,
-    Average,
-    Current
+    Previous = 0,
+    Average = 1,
+    Current = 2
   };
 
   struct Pose {

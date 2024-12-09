@@ -47,6 +47,8 @@ class OdometryFromBag {
   std::unique_ptr<rosbag2_cpp::Reader> m_reader;
   PointFactoryBase& m_point_factory;
 
+  TwistTimestampMode m_twist_t_mode;
+
 public:
   using value_type = Odometry;
   using difference_type = std::ptrdiff_t;
@@ -55,7 +57,10 @@ public:
   const value_type& operator*() const { return *m_odometry; }
   const value_type& operator->() const { return *m_odometry; }
 
-  OdometryFromBag(const std::filesystem::path& path_to_bag, const std::string_view& topic, PointFactoryBase& point_factory) : m_point_factory(point_factory){
+  OdometryFromBag(const std::filesystem::path& path_to_bag, const std::string_view& topic, PointFactoryBase& point_factory, TwistTimestampMode twist_t_mode = TwistTimestampMode::Average)
+      : m_point_factory(point_factory), 
+        m_twist_t_mode(twist_t_mode)
+  {
     rosbag2_storage::StorageOptions storage_options;
     storage_options.uri = path_to_bag;
 
@@ -78,7 +83,7 @@ public:
     }
 
     auto pts = m_point_factory(m_reader->read_next());
-    m_odometry.emplace(m_matcher.update(pts.t, pts.dp));
+    m_odometry.emplace(m_matcher.update(pts.t, pts.dp, m_twist_t_mode));
     return *this;
   }
 
@@ -89,6 +94,7 @@ public:
     m_matcher = std::move(other.m_matcher);
     m_reader.swap(other.m_reader);
     m_point_factory = other.m_point_factory;
+    m_twist_t_mode = other.m_twist_t_mode;
     return *this;
   }
 
@@ -96,7 +102,8 @@ public:
     m_odometry(std::move(other.m_odometry)),
     m_matcher(std::move(other.m_matcher)),
     m_reader(std::move(other.m_reader)),
-    m_point_factory(other.m_point_factory)
+    m_point_factory(other.m_point_factory),
+    m_twist_t_mode(other.m_twist_t_mode)
   {
   }
 
@@ -106,40 +113,60 @@ public:
 
 #include <ranges>
 
-std::ranges::subrange<OdometryFromBag, OdometryFromBag::sentinel> read_bag(const std::filesystem::path& path_to_bag, const std::string_view& topic, PointFactoryBase& point_factory) {
+std::ranges::subrange<OdometryFromBag, OdometryFromBag::sentinel> read_bag(const std::filesystem::path& path_to_bag, const std::string_view& topic, PointFactoryBase& point_factory, TwistTimestampMode ttm = TwistTimestampMode::Average) {
   return {
-    OdometryFromBag(path_to_bag, topic, point_factory),
+    OdometryFromBag(path_to_bag, topic, point_factory, ttm),
     OdometryFromBag::sentinel{}
   };
 }
 
 #include <fstream>
 
+static const std::map<std::string, TwistTimestampMode> twist_timestamp_mode_map {
+  { "previous", TwistTimestampMode::Previous },
+  { "average", TwistTimestampMode::Average },
+  { "current", TwistTimestampMode::Current }
+};
+
 int main(int argc, const char* argv[]) {
-  if (argc != 4) {
-    std::cerr << "Usage: " << argv[0] << " topic bag_path out_path" << std::endl;
+  if (argc != 5) {
+    std::cerr << "Usage: " << argv[0] << " topic bag_path out_path twist_timestamp_mode" << std::endl;
     return 1;
   }
 
   const char* topic = argv[1];
   const std::filesystem::path bag_path = argv[2];
   const std::filesystem::path out_path = argv[3];
+  const char* twist_timestamp_mode = argv[4];
+
+  auto ttm_it = twist_timestamp_mode_map.find(twist_timestamp_mode);
+  if (ttm_it == twist_timestamp_mode_map.end()) {
+    std::cerr << "Allowed values for twist_timestamp_mode: " << std::endl;
+    for (auto& kvp : twist_timestamp_mode_map)
+      std::cerr << kvp.first << std::endl;
+    return 1;
+  }
+  TwistTimestampMode ttm = ttm_it->second;
 
   LaserScanPointFactory pf;
-  auto bag = read_bag(bag_path, topic, pf);
+  auto bag = read_bag(bag_path, topic, pf, ttm);
 
   std::ofstream f(out_path);
   f << "x,y,phi,vx,vy,phidot" << std::endl;
 
   for (const Odometry& odom : bag) {
+    bool twist = odom.twist.has_value();
+
+    auto twist_t = twist? odom.twist->t.count() : 0;
+    auto pose_t = twist? odom.pose.t.count() : 0;
     double x = odom.pose.transform(0,2);
     double y = odom.pose.transform(1,2);
     double phi = std::atan2(odom.pose.transform(1,0), odom.pose.transform(0,0));
-    double vx = odom.twist->linear.x();
-    double vy = odom.twist->linear.y();
-    double phidot = odom.twist->angular;
+    double vx = twist? odom.twist->linear.x() : 0;
+    double vy = twist? odom.twist->linear.y() : 0;
+    double phidot = twist? odom.twist->angular : 0;
 
-    f << x << "," << y << "," << phi << "," << vx << "," << vy << "," << phidot << "\n";
+    f << pose_t << "," << x << "," << y << "," << phi << "," << twist_t << "," << vx << "," << vy << "," << phidot << "\n";
   }
 
   return 0;
