@@ -152,13 +152,13 @@ int main(int argc, const char* argv[]) {
   auto bag = read_bag(bag_path, topic, pf, ttm);
 
   std::ofstream f(out_path);
-  f << "x,y,phi,vx,vy,phidot" << std::endl;
+  f << "t_pose,x,y,phi,t_twist,vx,vy,phidot" << std::endl;
 
   for (const Odometry& odom : bag) {
     bool twist = odom.twist.has_value();
 
     auto twist_t = twist? odom.twist->t.count() : 0;
-    auto pose_t = twist? odom.pose.t.count() : 0;
+    auto pose_t = odom.pose.t.count();
     double x = odom.pose.transform(0,2);
     double y = odom.pose.transform(1,2);
     double phi = std::atan2(odom.pose.transform(1,0), odom.pose.transform(0,0));
