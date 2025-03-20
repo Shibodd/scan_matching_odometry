@@ -36,7 +36,7 @@ public:
   MatcherNode() : rclcpp::Node("scan_matching_odometry"), m_matcher("pm_config.yaml")
   {
     Parameters p(this);
-    m_frame_id = p.get<std::string>("frame_id", "scan_matching_odom");
+    m_frame_id = p.get<std::string>("frame_id", "odom");
 
     {
       Parameters scan_p = p.subparams("scan");

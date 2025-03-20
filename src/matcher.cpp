@@ -46,23 +46,36 @@ Odometry Matcher::update(std::chrono::nanoseconds t, const PointMatcher<double>:
     assert(std::abs(Tf.topLeftCorner<2,2>().determinant() - 1) < 1e-8);
     assert((Tf.bottomLeftCorner<1,3>() == Eigen::Matrix<double, 1, 3>(0, 0, 1)));
   
-    ans.pose = {
-      .t = t,
-      .transform = m_transform * Tf
-    };
-    m_transform = ans.pose.transform;
-
     // Compute twist
-
     Eigen::Vector2d translation = Tf.topRightCorner<2,1>();
     double rotation = std::atan2(Tf(1,0), Tf(0,0));
     double deltaT = std::chrono::duration<double>(t - m_old_data->t).count();
 
-    ans.twist = {
-      .t = get_twist_t(t, m_old_data->t, twist_timestamp_mode),
-      .linear = translation / deltaT,
-      .angular = rotation / deltaT
-    };
+    Eigen::Vector2d v = translation / deltaT;
+    double r = rotation / deltaT;
+
+    // Check whether the transformation makes sense or not
+    if (v.norm() > 8 || std::abs(r) > 7) {
+      fprintf(stderr, "Bad transformation! |V|=%lf, r=%lf dt=%lf\n", v.norm(), r, deltaT);
+      ans.pose = {
+        .t = m_old_data->t,
+        .transform = m_transform
+      };
+      ans.twist = std::nullopt;
+      T = std::nullopt;
+    } else {
+      // If it does, commit the result
+      ans.pose = {
+        .t = t,
+        .transform = m_transform * Tf
+      };
+      m_transform = ans.pose.transform;
+      ans.twist = {
+        .t = get_twist_t(t, m_old_data->t, twist_timestamp_mode),
+        .linear = v,
+        .angular = r
+      };
+    }
 
     m_old_data.emplace(T, std::move(dp), t);
   } else {
