@@ -1,7 +1,13 @@
 #include <scan_matching/matcher.hpp>
+#include <fstream>
 
 namespace scan_matching_odometry {
 
+Matcher::Matcher(const std::filesystem::path& path) {
+  std::ifstream is(path);
+  // m_icp.loadFromYaml(is);
+  m_icp.setDefault();
+}
 
 static inline std::chrono::nanoseconds get_twist_t(std::chrono::nanoseconds t, std::chrono::nanoseconds old_t, TwistTimestampMode mode) {
   switch (mode) {
@@ -20,17 +26,20 @@ static inline std::chrono::nanoseconds get_twist_t(std::chrono::nanoseconds t, s
   return std::chrono::nanoseconds(0);
 }
 
-
 Odometry Matcher::update(std::chrono::nanoseconds t, const PointMatcher<double>::DataPoints& dp, TwistTimestampMode twist_timestamp_mode) {
   Odometry ans;
+  std::optional<PointMatcher<double>::TransformationParameters> T;
 
   if (m_old_data.has_value()) {
-    PointMatcher<double>::ICP icp;
-    icp.setDefault();
-    PointMatcher<double>::TransformationParameters T = icp(dp, m_old_data->dp);
-    assert(T.rows() == 3 && T.cols() == 3);
 
-    Eigen::Ref<Eigen::Matrix3d> Tf(T);
+    if (m_old_data->T.has_value())
+      T = m_icp(dp, m_old_data->dp, *m_old_data->T);
+    else
+      T = m_icp(dp, m_old_data->dp);
+
+    assert(T->rows() == 3 && T->cols() == 3);
+
+    Eigen::Ref<Eigen::Matrix3d> Tf(*T);
     
     // Assert that the result is a rigid transformation
     assert((Tf(0,0) == Tf(1,1)) && (Tf(1,0) == -Tf(0,1)));
@@ -54,8 +63,9 @@ Odometry Matcher::update(std::chrono::nanoseconds t, const PointMatcher<double>:
       .linear = translation / deltaT,
       .angular = rotation / deltaT
     };
+
+    m_old_data.emplace(T, std::move(dp), t);
   } else {
-    m_old_data.emplace(std::move(dp), t);
     ans = Odometry {
       .pose = {
         .t = t,
@@ -63,9 +73,9 @@ Odometry Matcher::update(std::chrono::nanoseconds t, const PointMatcher<double>:
       },
       .twist = std::nullopt
     };
+    m_old_data.emplace(std::nullopt, std::move(dp), t);
   }
 
-  m_old_data.emplace(std::move(dp), t);
   return ans;
 }
 

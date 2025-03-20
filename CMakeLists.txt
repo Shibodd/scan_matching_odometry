@@ -29,4 +29,9 @@ install (TARGETS
   DESTINATION lib/${PROJECT_NAME}
 )
 
+install (FILES
+  config/pm_config.yaml
+  DESTINATION config/pm_config.yaml
+)
+
 ament_package()

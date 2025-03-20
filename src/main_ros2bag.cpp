@@ -33,7 +33,7 @@ struct LaserScanPointFactory : public PointFactoryBase {
 
     rclcpp::SerializedMessage serialized_msg(*msg->serialized_data);
     m_serialization.deserialize_message(&serialized_msg, &scan);
-
+    
     return Points {
       .t = std::chrono::nanoseconds(rclcpp::Time(scan.header.stamp).nanoseconds()),
       .dp = rosMsgToPointMatcherCloud<double>(scan)
@@ -58,7 +58,8 @@ public:
   const value_type& operator->() const { return *m_odometry; }
 
   OdometryFromBag(const std::filesystem::path& path_to_bag, const std::string_view& topic, PointFactoryBase& point_factory, TwistTimestampMode twist_t_mode = TwistTimestampMode::Average)
-      : m_point_factory(point_factory), 
+      : m_matcher("config/pm_config.yaml"),
+        m_point_factory(point_factory),
         m_twist_t_mode(twist_t_mode)
   {
     rosbag2_storage::StorageOptions storage_options;
